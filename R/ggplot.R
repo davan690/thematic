@@ -5,7 +5,7 @@
 ggplot_theme_set <- function(theme = .globals$theme) {
   if (!is_installed("ggplot2")) return(NULL)
   ggplot_theme_restore()
-  .globals$ggplot_theme <- ggplot2::theme_set(ggtheme_auto(theme))
+  .globals$ggplot_theme <- update_ggtheme(theme)
 }
 
 ggplot_theme_restore <- function() {
@@ -14,45 +14,113 @@ ggplot_theme_restore <- function() {
   rm("ggplot_theme", envir = .globals)
 }
 
-ggtheme_auto <- function(theme = .globals$theme) {
-  fg <- theme$fg
-  bg <- theme$bg
-  font <- theme$font
+update_ggtheme <- function(theme = .globals$theme) {
+  # Behavior depends on the currently set theme's use of fg/bg
+  # For example, theme_bw() uses fg/bg much differently than theme_gray()
+  # and we should try our best to respect those design choices
+  # TODO: exit early with warning if current theme is incomplete?
+  old_theme <- ggplot2::theme_get()
 
-  themeGray <- ggplot2::theme_gray()
-
-  text <- ggplot2::element_text(
-    colour = fg,
-    family = font$family,
-    size = themeGray$text$size * font$scale
+  old <- computed_theme_elements(
+    c(
+      "text", "plot.background",
+      "panel.background", "panel.grid",
+      "legend.background", "legend.box.background", "legend.key",
+      "strip.background"
+    ),
+    old_theme
   )
-  line <- ggplot2::element_line(colour = fg)
 
-  themeGray + ggplot2::theme(
+  new_fg <- theme$fg
+  new_bg <- theme$bg
+
+  # *Always* define the plot background
+  ggplot2::theme_update(
+    plot.background = ggplot2::element_rect(
+      fill = new_bg,
+      colour = "transparent"
+    )
+  )
+
+  # TODO: make sure default family doesn't override a specified family
+  text <- ggplot2::element_text(
+    colour = new_fg,
+    family = if (!identical(theme$font$family, "")) theme$font$family,
+    size = old$text$size * theme$font$scale
+  )
+  line <- ggplot2::element_line(colour = new_fg)
+
+  # TODO: should probably be (conditionally) updating?
+  update_non_blank_elements(
     line = line,
     text = text,
     axis.title = text,
     axis.text = text,
     axis.ticks = line,
-    plot.background = ggplot2::element_rect(fill = bg, colour = "transparent"),
-    panel.background = ggplot2::element_rect(
-      fill = adjust_color(themeGray$panel.background$fill, bg, fg)
-    ),
-    panel.grid = ggplot2::element_line(colour = bg),
-    legend.background = ggplot2::element_rect(fill = "transparent"),
-    legend.box.background = ggplot2::element_rect(
-      fill = "transparent", colour = "transparent"
-    ),
-    legend.key = ggplot2::element_rect(
-      fill = adjust_color(themeGray$legend.key$fill, bg, fg),
-      colour = bg
-    ),
-    strip.background = ggplot2::element_rect(
-      fill = adjust_color(themeGray$strip.background$fill, bg, fg)
-    ),
     strip.text = text
   )
+
+  # Like %OR%, but for transparent as well
+  `%missing%` <- function(x, y) {
+    if (identical(x, "transparent")) return(y)
+    x %OR% y
+  }
+
+  # The remaining updates depend on the old fg/bg
+  old_bg <- old$plot.background$fill %missing% "white"
+  old_fg <- old$text$colour %missing% "black"
+
+  # Main idea: if a (top) color is visibly different from the color
+  # underneath it (bottom), then find the amount of mixture (of fg/bg)
+  # it took to obtain the top color (based on perceptual their distance),
+  # and apply that amount to the new fg/bg
+  update_top_color <- function(top, bottom) {
+    if (identical(top %missing% bottom, bottom)) {
+      return("transparent")
+    }
+    amt <- amount_of_mixture(top, old_bg, old_fg)
+    mix_colors(new_bg, new_fg, amt)
+  }
+
+  ggplot2::theme_update(
+    panel.background = ggplot2::element_rect(
+      fill = update_top_color(old$panel.background$fill, old_bg)
+    ),
+    panel.grid = ggplot2::element_line(
+      colour = update_top_color(old$panel.grid$colour, old_bg)
+    ),
+    legend.background = ggplot2::element_rect(
+      fill = update_top_color(old$legend.background$fill, old_bg)
+    ),
+    legend.box.background = ggplot2::element_rect(
+      fill = update_top_color(old$legend.box.background$fill, old_bg)
+    ),
+    legend.key = ggplot2::element_rect(
+      fill = update_top_color(old$legend.key$fill, old_bg)
+    ),
+    # TODO: should we be comparing to panel.background?
+    strip.background = ggplot2::element_rect(
+      fill = update_top_color(old$strip.background$fill, old_bg)
+    )
+  )
+
+  old_theme
 }
+
+
+computed_theme_elements <- function(x, theme) {
+  setNames(lapply(x, ggplot2::calc_element, theme), x)
+}
+
+# Update only the non-blank elements in `theme`
+update_non_blank_elements <- function(...) {
+  is_blank <- vapply(ggplot2::theme_get(), inherits, logical(1), "element_blank")
+  blank_elements <- names(is_blank)[is_blank]
+  elements <- list(...)
+  elements <- elements[setdiff(names(elements), blank_elements)]
+  do.call(ggplot2::theme_update, elements)
+}
+
 
 # -----------------------------------------------------------------------------------
 # Custom ggplot_build()
