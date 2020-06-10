@@ -5,7 +5,7 @@
 ggplot_theme_set <- function(theme = .globals$theme) {
   if (!is_installed("ggplot2")) return(NULL)
   ggplot_theme_restore()
-  .globals$ggplot_theme <- ggplot2::theme_set(ggtheme_auto(theme))
+  .globals$ggplot_theme <- update_ggtheme(theme)
 }
 
 ggplot_theme_restore <- function() {
@@ -14,45 +14,91 @@ ggplot_theme_restore <- function() {
   rm("ggplot_theme", envir = .globals)
 }
 
-ggtheme_auto <- function(theme = .globals$theme) {
-  fg <- theme$fg
-  bg <- theme$bg
-  font <- theme$font
+update_ggtheme <- function(theme = .globals$theme) {
+  # Behavior depends on the currently set theme's use of fg/bg
+  # For example, theme_bw() uses fg/bg much differently than theme_gray()
+  # and we should try our best to respect those design choices
+  # TODO: exit early with warning if current theme is incomplete?
+  old_theme <- ggplot2::theme_get()
+  old_theme_computed <- computed_theme_elements(old_theme)
 
-  themeGray <- ggplot2::theme_gray()
+  # Like %OR%, but for transparent as well
+  `%missing%` <- function(x, y) {
+    if (identical(x, "transparent")) return(y)
+    x %OR% y
+  }
 
-  text <- ggplot2::element_text(
-    colour = fg,
-    family = font$family,
-    size = themeGray$text$size * font$scale
-  )
-  line <- ggplot2::element_line(colour = fg)
+  # The remaining updates depend on the old fg/bg
+  old_bg <- old_theme_computed$plot.background$fill %missing% "white"
+  old_fg <- old_theme_computed$title$colour %missing% "black"
 
-  themeGray + ggplot2::theme(
-    line = line,
-    text = text,
-    axis.title = text,
-    axis.text = text,
-    axis.ticks = line,
-    plot.background = ggplot2::element_rect(fill = bg, colour = "transparent"),
-    panel.background = ggplot2::element_rect(
-      fill = adjust_color(themeGray$panel.background$fill, bg, fg)
-    ),
-    panel.grid = ggplot2::element_line(colour = bg),
-    legend.background = ggplot2::element_rect(fill = "transparent"),
-    legend.box.background = ggplot2::element_rect(
-      fill = "transparent", colour = "transparent"
-    ),
-    legend.key = ggplot2::element_rect(
-      fill = adjust_color(themeGray$legend.key$fill, bg, fg),
-      colour = bg
-    ),
-    strip.background = ggplot2::element_rect(
-      fill = adjust_color(themeGray$strip.background$fill, bg, fg)
-    ),
-    strip.text = text
-  )
+  new_fg <- theme$fg
+  new_bg <- theme$bg
+
+  # Main idea: theme colors are comprised of mixtures of bg and fg
+  # So, given a color, get it's perceptual distance between bg <-> fg
+  # and use that 'amount of mixture' to inform a new color
+  update_color <- function(color) {
+    amt <- amount_of_mixture(color, old_bg, old_fg)
+    mix_colors(new_bg, new_fg, amt)
+  }
+
+  update_element <- function(element, ggtheme, name) {
+    UseMethod("update_element")
+  }
+
+  update_element.element_text <- function(element, ggtheme, name) {
+    # TODO: font size and family...change regardless of old value?
+    new_element <- ggplot2::element_text(
+      colour = update_color(ggtheme[[name]]$colour),
+      family = if (!identical(theme$font$family, "")) theme$font$family,
+      size = element$size * theme$font$scale
+    )
+    do.call(ggplot2::theme_update, setNames(list(new_element), name))
+  }
+
+  update_element.element_rect <- function(element, ggtheme, name) {
+    new_element <- ggplot2::element_rect(
+      fill = update_color(ggtheme[[name]]$fill),
+      colour = update_color(ggtheme[[name]]$colour)
+    )
+    do.call(ggplot2::theme_update, setNames(list(new_element), name))
+  }
+
+  update_element.element_line <- function(element, ggtheme, name) {
+    new_element <- ggplot2::element_line(
+      colour = update_color(ggtheme[[name]]$colour)
+    )
+    do.call(ggplot2::theme_update, setNames(list(new_element), name))
+  }
+
+  update_element.element_blank <- function(element, ggtheme, name) {
+    invisible()
+  }
+
+  update_element.default <- function(element, ggtheme, name) {
+    invisible()
+  }
+
+  Map(function(x, y) {
+    update_element(x, old_theme_computed, y)
+  }, old_theme_computed, names(old_theme_computed))
+
+  old_theme
 }
+
+# Get all the computed theme elements from a given theme definition
+computed_theme_elements <- function(theme) {
+  elements <- names(ggplot2::get_element_tree())
+  computed <- setNames(lapply(elements, calc_element_safe, theme), elements)
+  dropNulls(computed)
+}
+
+# It's not safe to calc all elements (e.g., plot.margin)
+calc_element_safe <- function(...) {
+  tryNULL(ggplot2::calc_element(...))
+}
+
 
 # -----------------------------------------------------------------------------------
 # Custom ggplot_build()
